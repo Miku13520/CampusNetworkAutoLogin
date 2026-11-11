@@ -1,0 +1,2 @@
+# CampusNetworkAutoLogin
+用于福州大学晋江校区校园网自动认证
