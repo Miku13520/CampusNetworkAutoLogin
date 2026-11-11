@@ -1,0 +1,16 @@
+# Never publish locally generated credentials or authentication diagnostics.
+credential.xml
+*.credential
+*.clixml
+*.log
+*.log.*
+setup-status.json
+setup-error.json
+*实测结果.json
+*无感认证结果.json
+*.evtx
+*.har
+*.dmp
+*.tmp
+Thumbs.db
+Desktop.ini
