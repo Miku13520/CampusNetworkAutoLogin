@@ -1,11 +1,25 @@
 ﻿#requires -Version 5.1
-$ErrorActionPreference='Stop'
-$base=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CampusNetworkAutoLogin'
-if(-not(Test-Path -LiteralPath (Join-Path $base 'credential.xml'))){throw 'Run 2-SaveAccount.cmd and save your account first.'}
-$task=Get-ScheduledTask -TaskName 'CampusNetworkAutoLogin' -ErrorAction Stop
-if(($task.Actions.Arguments -join ' ') -notlike '*CampusNetworkAutoLogin\CampusLogin.ps1*'){throw 'Unexpected task action.'}
-Enable-ScheduledTask -TaskName 'CampusNetworkAutoLogin' | Out-Null
-Start-ScheduledTask -TaskName 'CampusNetworkAutoLogin'
-Write-Host 'Enabled. Network check started. Log: '
-Write-Host (Join-Path $base 'campus-login.log')
-Write-Host 'A check while already online does not prove a new login. Verify after your next normal reboot.'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CampusTasks.ps1')
+
+$tasks = @(Get-CampusTasks -RequireAll)
+if (-not (Test-Path -LiteralPath (Join-Path $campusInstallDirectory 'credential.xml'))) {
+    throw 'Run 2-SaveAccount.cmd and save your account first.'
+}
+& $campusScriptPath -ResetAuthHold
+if ($LASTEXITCODE -ne 0) { throw 'Could not reset authentication state. See campus-login.log.' }
+
+$enabled = @()
+try {
+    foreach ($task in $tasks) {
+        if ($task.Settings.Enabled) { continue }
+        Enable-ScheduledTask -InputObject $task | Out-Null
+        $enabled += $task
+    }
+} catch {
+    Disable-CampusTasks $enabled
+    throw
+}
+Start-ScheduledTask -InputObject $tasks[0]
+Write-Host 'Logon and two-minute checks enabled. A network check has started.'
+Write-Host (Join-Path $campusInstallDirectory 'campus-login.log')

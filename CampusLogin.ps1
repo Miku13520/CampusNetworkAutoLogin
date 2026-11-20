@@ -1,10 +1,11 @@
 ﻿#requires -Version 5.1
 <#
-One-shot campus authentication. Never stores a portal query or plaintext password.
+Campus authentication and periodic reconnect checks.
 Exit codes: 0 online; 10 target Wi-Fi absent; 11 no trusted fresh portal;
 20 CheckOnly: authentication needed and supported; 21 manual authentication needed;
 22 configuration/credential error; 23 authentication rejected; 24 accepted but unverified;
-25 request/protocol failure; 26 another instance is running.
+25 request/protocol failure; 26 another instance is running;
+27 authentication is paused or waiting before another submission.
 #>
 [CmdletBinding()]
 param(
@@ -12,6 +13,8 @@ param(
     [string]$CredentialPath = '',
     [switch]$CheckOnly,
     [switch]$NoWait,
+    [switch]$Periodic,
+    [switch]$ResetAuthHold,
     [switch]$LibraryOnly
 )
 
@@ -23,6 +26,7 @@ $script:CampusProbeUri = [uri]'http://www.msftconnecttest.com/connecttest.txt'
 $script:CampusDeadline = $null
 $script:CampusCookieJar = New-Object System.Net.CookieContainer
 $script:CampusLogPath = Join-Path $script:CampusScriptDirectory 'campus-login.log'
+$script:CampusAuthHoldPath = Join-Path $script:CampusScriptDirectory 'campus-auth.state'
 
 function Write-CampusStatus {
     param([int]$Code, [string]$Message)
@@ -36,6 +40,32 @@ function Write-CampusStatus {
         Add-Content -LiteralPath $script:CampusLogPath -Encoding UTF8 -Value (
             '{0} code={1} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Code, $Message)
     } catch { }
+}
+
+function Get-CampusAuthHold {
+    if (-not (Test-Path -LiteralPath $script:CampusAuthHoldPath -ErrorAction Stop)) { return }
+    $saved = [IO.File]::ReadAllText($script:CampusAuthHoldPath)
+    if ($saved -ceq 'Paused') { return 'Paused' }
+
+    $retryAfter = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($saved, 'o', [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind, [ref]$retryAfter) -or
+        $retryAfter.Kind -ne [DateTimeKind]::Utc) {
+        throw 'Invalid authentication hold.'
+    }
+    if ([DateTime]::UtcNow -lt $retryAfter) { return 'Cooldown' }
+}
+
+function Set-CampusAuthHold {
+    param([string]$Value)
+    # Atomically publish the hold before submitting credentials. A stopped task must not lose it.
+    $tempPath = $script:CampusAuthHoldPath + '.tmp'
+    [IO.File]::WriteAllText($tempPath, $Value)
+    if ([IO.File]::Exists($script:CampusAuthHoldPath)) {
+        [IO.File]::Replace($tempPath, $script:CampusAuthHoldPath, [NullString]::Value)
+    } else {
+        [IO.File]::Move($tempPath, $script:CampusAuthHoldPath)
+    }
 }
 
 function Get-CampusProperty {
@@ -105,6 +135,7 @@ function Invoke-CampusHttp {
         $timeout = [Math]::Min($timeout, $remaining)
     }
     $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.CachePolicy = [System.Net.Cache.RequestCachePolicy]::new([System.Net.Cache.RequestCacheLevel]::NoCacheNoStore)
     $request.Proxy = $null
     $request.AllowAutoRedirect = $false
     $request.UseDefaultCredentials = $false
@@ -252,17 +283,33 @@ function Invoke-CampusLoginMain {
             $lastCode = 11
             try { $discovery = Find-CampusPortal } catch { $discovery = $null }
             if ($null -ne $discovery -and $discovery.State -eq 'Online') {
-                Write-CampusStatus 0 'Internet is already available; no authentication sent.'; return 0
+                if (-not $Periodic -or $CheckOnly) {
+                    Write-CampusStatus 0 'Internet is already available; no authentication sent.'
+                }
+                return 0
             }
             if ($null -ne $discovery -and $discovery.State -eq 'Portal') { break }
         }
-        if ($NoWait -or [DateTime]::UtcNow.AddSeconds(3) -ge $script:CampusDeadline) { break }
+        if ($Periodic -or $NoWait -or [DateTime]::UtcNow.AddSeconds(3) -ge $script:CampusDeadline) { break }
         Start-Sleep -Seconds 3
     } while ([DateTime]::UtcNow -lt $script:CampusDeadline)
     if ($null -eq $discovery -or $discovery.State -ne 'Portal') {
-        if ($lastCode -eq 10) { Write-CampusStatus 10 'Target campus Wi-Fi is not connected.' }
+        if ($lastCode -eq 10) {
+            if (-not $Periodic -or $CheckOnly) { Write-CampusStatus 10 'Target campus Wi-Fi is not connected.' }
+        }
         else { Write-CampusStatus 11 'No trusted fresh campus authentication redirect was found.' }
         return $lastCode
+    }
+
+    if (-not $CheckOnly) {
+        try { $hold = Get-CampusAuthHold }
+        catch { Write-CampusStatus 22 'Authentication state could not be read. Run 3-Enable.cmd to reset it.'; return 22 }
+        if ($hold) {
+            if (-not $Periodic) {
+                Write-CampusStatus 27 'Authentication is paused or waiting before another submission.'
+            }
+            return 27
+        }
     }
 
     # Uri.Query preserves the escaped original query. Remove only its initial question mark.
@@ -277,10 +324,14 @@ function Invoke-CampusLoginMain {
         -not [string]::IsNullOrEmpty([string](Get-CampusProperty $page 'validCodeUrl')) -or
         [string](Get-CampusProperty $page 'isNoOperatorPassword') -eq 'true' -or
         [string](Get-CampusProperty $page 'isNoOperatorUserId') -eq 'true') {
+        if (-not $CheckOnly) { Set-CampusAuthHold 'Paused' }
         Write-CampusStatus 21 'Portal requires manual or unsupported authentication.'; return 21
     }
     try { $service = Get-CampusService $services $configuredService }
-    catch { Write-CampusStatus 21 'Portal service selection requires manual review.'; return 21 }
+    catch {
+        if (-not $CheckOnly) { Set-CampusAuthHold 'Paused' }
+        Write-CampusStatus 21 'Portal service selection requires manual review.'; return 21
+    }
     if ($CheckOnly) {
         Write-CampusStatus 20 'CheckOnly: supported campus authentication is required; credentials were not read.'; return 20
     }
@@ -292,7 +343,14 @@ function Invoke-CampusLoginMain {
             [string]::IsNullOrWhiteSpace($credential.UserName) -or $credential.Password.Length -eq 0) {
             throw 'Invalid credential.'
         }
-    } catch { Write-CampusStatus 22 'Saved credentials are missing or cannot be decrypted by this Windows user.'; return 22 }
+    } catch {
+        Set-CampusAuthHold 'Paused'
+        Write-CampusStatus 22 'Saved credentials are missing or cannot be decrypted by this Windows user.'; return 22
+    }
+    try {
+        $retryAfter = [DateTime]::UtcNow.AddMinutes(10).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        Set-CampusAuthHold $retryAfter
+    } catch { Write-CampusStatus 22 'Could not save authentication state.'; return 22 }
     $body = $null
     try {
         $plainPassword = $credential.GetNetworkCredential().Password
@@ -304,16 +362,17 @@ function Invoke-CampusLoginMain {
         Write-CampusStatus 25 'Authentication request failed; it was not retried.'; return 25
     } finally { $body = $null; $plainPassword = $null; $credential = $null }
     if ([string](Get-CampusProperty $result 'result') -cne 'success') {
-        Write-CampusStatus 23 'Portal did not accept authentication; automatic retries are disabled.'; return 23
+        Set-CampusAuthHold 'Paused'
+        Write-CampusStatus 23 'Portal did not accept authentication. Run 3-Enable.cmd after resolving the issue.'; return 23
     }
     # Verify actual connectivity after success without submitting any more credentials.
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
-        try {
-            $probe = Invoke-CampusHttp $script:CampusProbeUri
-            if ($probe.Status -eq 200 -and $probe.Body -ceq 'Microsoft Connect Test') {
-                Write-CampusStatus 0 'Campus authentication succeeded and Internet access was verified.'; return 0
-            }
-        } catch { }
+        $probe = $null
+        try { $probe = Invoke-CampusHttp $script:CampusProbeUri } catch { }
+        if ($null -ne $probe -and $probe.Status -eq 200 -and $probe.Body -ceq 'Microsoft Connect Test') {
+            [IO.File]::Delete($script:CampusAuthHoldPath)
+            Write-CampusStatus 0 'Campus authentication succeeded and Internet access was verified.'; return 0
+        }
         if ($NoWait -or [DateTime]::UtcNow.AddSeconds(2) -ge $script:CampusDeadline) { break }
         Start-Sleep -Seconds 2
     }
@@ -325,8 +384,11 @@ $mutex = $null
 $ownsMutex = $false
 try {
     $mutex = New-Object Threading.Mutex($false, 'Local\CampusNetworkAutoLogin-Fzdxkjy-web')
-    try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
+    $mutexWait = 0
+    if ($ResetAuthHold) { $mutexWait = 5000 }
+    try { $ownsMutex = $mutex.WaitOne($mutexWait) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
     if (-not $ownsMutex) { Write-CampusStatus 26 'Another campus login check is already running.'; $code = 26 }
+    elseif ($ResetAuthHold) { [IO.File]::Delete($script:CampusAuthHoldPath); $code = 0 }
     else { $code = Invoke-CampusLoginMain }
 } catch { Write-CampusStatus 25 'Campus login stopped because of an unexpected local error.'; $code = 25 }
 finally {

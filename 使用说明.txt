@@ -1,12 +1,14 @@
-适用范围：另一台 Windows 10/11 电脑，同一个 Fzdxkjy-web 校园网、10.20.21.2 门户。
+适用于连接 Fzdxkjy-web 校园网和 10.20.21.2 门户的 Windows 10/11 电脑。
 
 1. 将压缩包复制到新电脑，完整解压后再操作，勿在压缩包内直接运行。
 2. 在准备使用校园网的那个 Windows 账号下，双击 1-Prepare.cmd。看到 Step 1 complete 后关闭窗口。
-3. 双击 2-SaveAccount.cmd，在本机窗口输入新电脑要使用的校园网账号和密码，点击“保存到本机”，保存成功后关闭窗口。
-4. 双击 3-Enable.cmd，开启开机自动认证并立即检测一次。
-5. 下次正常重启后检查是否直接联网。已联网时的检测成功，仅表示任务能运行，不代表真实登录已验证。
+3. 首次安装时双击 2-SaveAccount.cmd，在本机窗口输入校园网账号和密码，点击“保存到本机”，保存成功后关闭窗口。
+4. 双击 3-Enable.cmd，开启开机登录和每 2 分钟的定时检查，并立即检查一次网络。
+5. 下次出现校园网认证页时，等下一轮检查，并确认外网能打开。
 
-开关：3-Enable.cmd 开启，4-Disable.cmd 关闭。也可在 Windows 任务计划程序中启用/禁用 CampusNetworkAutoLogin。
+旧版用户在同一个 Windows 账号下运行新版的 1-Prepare.cmd 和 3-Enable.cmd 即可升级，并沿用已保存的账号。
+
+双击 4-Disable.cmd 可同时关闭开机登录和定时检查。修复账号或门户问题后，可重新运行 3-Enable.cmd 恢复自动登录。
 
 程序安装到 %LOCALAPPDATA%\CampusNetworkAutoLogin。安装完成后，删除解压出来的安装包不影响运行。
 

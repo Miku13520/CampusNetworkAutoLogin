@@ -4,6 +4,7 @@ credential.xml
 *.clixml
 *.log
 *.log.*
+campus-auth.state
 setup-status.json
 setup-error.json
 *实测结果.json
